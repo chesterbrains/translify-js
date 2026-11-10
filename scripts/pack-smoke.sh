@@ -14,6 +14,7 @@ npm install --silent --no-audit --no-fund "$tgz" >/dev/null
 
 node --input-type=module -e "import('@translifyhq/client').then((m) => { if (typeof m.createTranslify !== 'function' || typeof m.localStorageStorage !== 'function') process.exit(1); })"
 node -e "const m = require('@translifyhq/client'); if (typeof m.createTranslify !== 'function' || typeof m.TranslifyError !== 'function') process.exit(1)"
+npx translify-client types --help | grep -q -- '--base-url'
 npx translify-client --help | grep -q -- '--base-url'
 test -f node_modules/@translifyhq/client/dist/index.d.ts
 

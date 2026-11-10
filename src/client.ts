@@ -59,8 +59,11 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
   /** Merge the locale's entries into one frozen bundle; keep identity when nothing changed. */
   const publish = (locale: string): TranslifyBundle => {
     const merged: Record<string, string> = {};
-    for (const ref of refs(locale)) Object.assign(merged, entries.get(ref.storageKey)?.bundle);
+    const locus = refs(locale);
     const previous = bundles.get(locale);
+    // Complete or absent (spec §6 step 4): a namespace still missing means nothing new to show.
+    if (locus.some((ref) => !entries.has(ref.storageKey))) return previous ?? (Object.freeze({}) as TranslifyBundle);
+    for (const ref of locus) Object.assign(merged, entries.get(ref.storageKey)?.bundle);
     if (previous !== undefined && sameBundle(previous, merged)) return previous;
 
     const next = Object.freeze(merged) as TranslifyBundle;
@@ -75,21 +78,33 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
     await writeEntry(resolved.storage, ref.storageKey, entry);
   };
 
-  /** One request per entry at a time; concurrent callers share it. */
+  /**
+   * One request per entry at a time; concurrent callers share it. A revalidation (an etag is
+   * held) that fails applies the failure policy (spec §6 step 3) exactly once, here, however
+   * many callers share the request; callers only rethrow.
+   */
   const request = (ref: EntryRef, etag: string | undefined): Promise<Entry> => {
     const pending = inflight.get(ref.storageKey);
     if (pending !== undefined) return pending;
 
-    const held = entries.get(ref.storageKey);
+    const current = entries.get(ref.storageKey);
     const run = (async (): Promise<Entry> => {
       if (disposed) throw new TranslifyError('NETWORK', 'client disposed');
-      const outcome = await fetchEntry(resolved.fetch, ref.url, etag, controller.signal).catch((reason: unknown) => {
-        // A fetch aborted by dispose says why; any other abort keeps the fetcher's wording.
-        throw disposed ? new TranslifyError('NETWORK', 'client disposed') : reason;
-      });
+      let outcome;
+      try {
+        outcome = await fetchEntry(resolved.fetch, ref.url, etag, controller.signal);
+      } catch (reason) {
+        // A fetch aborted by dispose says why; any other failure keeps the fetcher's wording.
+        const error = disposed ? new TranslifyError('NETWORK', 'client disposed') : asTranslifyError(reason);
+        if (etag !== undefined) {
+          if (isDefinitive(error.code)) await deleteEntry(resolved.storage, ref.storageKey);
+          resolved.onError(error);
+        }
+        throw error;
+      }
       if (outcome.kind === 'notModified') {
-        if (held === undefined) throw new TranslifyError('SERVER', '304 without a validator', 304);
-        const confirmed: Entry = { ...held, fetchedAt: Date.now() };
+        if (current === undefined) throw new TranslifyError('SERVER', '304 without a validator', 304);
+        const confirmed: Entry = { ...current, fetchedAt: Date.now() };
         await store(ref, confirmed);
 
         return confirmed;
@@ -103,17 +118,9 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
     return run;
   };
 
-  /** Revalidate a held entry and apply the failure policy (spec §6 step 3). Rethrows after reporting. */
+  /** Revalidate a held entry; the shared request has already reported and applied the policy. */
   const revalidate = async (ref: EntryRef): Promise<void> => {
-    const held = entries.get(ref.storageKey);
-    try {
-      await request(ref, held?.etag);
-    } catch (reason) {
-      const error = asTranslifyError(reason);
-      if (isDefinitive(error.code)) await deleteEntry(resolved.storage, ref.storageKey);
-      resolved.onError(error);
-      throw error;
-    }
+    await request(ref, entries.get(ref.storageKey)?.etag);
   };
 
   /** Memory, then storage. */

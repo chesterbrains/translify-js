@@ -375,3 +375,61 @@ describe('dispose', () => {
     expect(client.get('it-IT', 'a')).toBe('b');
   });
 });
+
+describe('review fixes', () => {
+  it('never publishes a partial bundle while a namespace is still loading', async () => {
+    const { client, fetchFn, storage } = harness({ namespaces: ['cart', 'checkout'] });
+    await writeEntry(storage, entryRef(base, 'it-IT', 'cart').storageKey, { etag: '"c1"', bundle: { 'cart.title': 'C' }, fetchedAt: 1 });
+    let releaseCheckout!: () => void;
+    fetchFn.mockImplementation((url: string) => {
+      if (url.includes('namespace=cart')) return Promise.resolve(okResponse({ 'cart.title': 'C2' }, '"c2"'));
+
+      return new Promise((resolve) => {
+        releaseCheckout = () => resolve(okResponse({ 'checkout.pay': 'P' }, '"k1"'));
+      });
+    });
+    const listener = vi.fn();
+    client.subscribe(listener);
+
+    const pending = client.load('it-IT');
+    await flush();
+    expect(client.bundle('it-IT')).toBeUndefined();
+    expect(listener).not.toHaveBeenCalled();
+
+    releaseCheckout();
+    const bundle = await pending;
+    expect(bundle).toEqual({ 'cart.title': 'C2', 'checkout.pay': 'P' });
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves bundle undefined after a namespace fails even when another was held', async () => {
+    const { client, fetchFn, storage } = harness({ namespaces: ['cart', 'checkout'] });
+    await writeEntry(storage, entryRef(base, 'it-IT', 'cart').storageKey, { etag: '"c1"', bundle: { 'cart.title': 'C' }, fetchedAt: 1 });
+    fetchFn.mockImplementation((url: string) => Promise.resolve(url.includes('namespace=cart') ? res(304) : res(404)));
+
+    await expect(client.load('it-IT')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await flush();
+    expect(client.bundle('it-IT')).toBeUndefined();
+  });
+
+  it('reports one failed response once even when a refresh shares the request', async () => {
+    const { client, fetchFn, storage, onError } = harness();
+    const ref = entryRef(base, 'it-IT', undefined);
+    await writeEntry(storage, ref.storageKey, { etag: '"e1"', bundle: { a: 'old' }, fetchedAt: 1 });
+    let release!: () => void;
+    fetchFn.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = () => resolve(res(503));
+      }),
+    );
+
+    await client.load('it-IT'); // background revalidation in flight
+    const refreshing = client.refresh('it-IT'); // shares it
+    release();
+    await expect(refreshing).rejects.toMatchObject({ status: 503 });
+    await flush();
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+});

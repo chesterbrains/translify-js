@@ -186,3 +186,26 @@ describe('main', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 });
+
+describe('main (review fixes)', () => {
+  it('accepts the documented leading "types" word', async () => {
+    const { io, written, fetchFn } = fake();
+    fetchFn.mockResolvedValueOnce(okResponse({ a: 'b' }));
+    expect(await main(['types', ...ARGS, '--key', 'pk_x'], io)).toBe(EXIT.ok);
+    expect(written.has('src/keys.d.ts')).toBe(true);
+  });
+
+  it('"types --help" prints usage', async () => {
+    const { io, out } = fake();
+    expect(await main(['types', '--help'], io)).toBe(EXIT.ok);
+    expect(out.join('\n')).toMatch(/--base-url/);
+  });
+
+  it('normalises a trailing slash on --base-url like the library does', async () => {
+    const { io, fetchFn } = fake();
+    fetchFn.mockResolvedValueOnce(okResponse({ a: 'b' }));
+    const argv = ARGS.map((a) => (a === 'https://h/api' ? 'https://h/api/' : a));
+    expect(await main([...argv, '--key', 'pk_x'], io)).toBe(EXIT.ok);
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('https://h/api/delivery/acme-ecom/production/en-US?key=pk_x');
+  });
+});

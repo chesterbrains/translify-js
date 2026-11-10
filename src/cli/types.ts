@@ -75,10 +75,12 @@ interface Parsed {
 class UsageError extends Error {}
 
 const parse = (argv: string[], env: CliIo['env']): Parsed | 'help' => {
+  // `npx @translifyhq/client types …` is the documented form; the bare form is accepted too.
+  const args = argv[0] === 'types' ? argv.slice(1) : argv;
   let values: Record<string, string | boolean | string[] | undefined>;
   try {
     ({ values } = parseArgs({
-      args: argv,
+      args,
       strict: true,
       allowPositionals: false,
       options: {
@@ -129,9 +131,10 @@ export const main = async (argv: string[], io: CliIo): Promise<number> => {
 
       return EXIT.ok;
     }
-    parsed = result;
-    // Reuse the library's validation so the CLI refuses exactly what the client refuses.
-    resolveOptions({ ...parsed, fetch: io.fetch });
+    // Reuse the library's validation and normalisation (trailing slash, trimming), so the CLI
+    // refuses exactly what the client refuses and builds the same URL.
+    const resolved = resolveOptions({ ...result, fetch: io.fetch });
+    parsed = { ...result, baseUrl: resolved.baseUrl, project: resolved.project, environment: resolved.environment, key: resolved.key };
   } catch (error) {
     io.stderr(`error: ${error instanceof Error ? error.message : String(error)}`);
     io.stderr(USAGE);
