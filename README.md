@@ -30,7 +30,7 @@ bundle['cart.title']; // "Il tuo carrello"
 translify.get('it-IT', 'cart.title'); // same, synchronous
 ```
 
-`baseUrl` is required and has no default: the hostname is yours to pin, and a published package cannot change its default later without breaking installed versions.
+`baseUrl` is required. The package ships no default hostname: the hostname is yours to pin, and a published package could not change a baked-in default later without breaking installed versions.
 
 The key is a **publishable** key (`pk_…`). It ships in your browser bundle by design and travels as `?key=` so the edge cache can key on it; a secret key (`sk_…`) is refused before any request is made.
 
