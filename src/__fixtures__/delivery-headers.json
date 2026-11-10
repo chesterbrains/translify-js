@@ -1,0 +1,18 @@
+{
+  "_comment": "Response headers of GET /api/delivery/:project/:env/:locale?key=pk_… as DeliveryController sends them (translify-be src/translations/controllers/delivery.controller.ts, 2026-11-09). The ETag is the identity representation's; the gzip variant appends -gz inside the quotes.",
+  "identity": {
+    "etag": "\"9f2b1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809\"",
+    "cache-control": "public, max-age=30, s-maxage=30",
+    "vary": "Accept-Encoding",
+    "timing-allow-origin": "*",
+    "content-type": "application/json; charset=utf-8"
+  },
+  "gzip": {
+    "etag": "\"9f2b1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809-gz\"",
+    "cache-control": "public, max-age=30, s-maxage=30",
+    "vary": "Accept-Encoding",
+    "timing-allow-origin": "*",
+    "content-encoding": "gzip",
+    "content-type": "application/json; charset=utf-8"
+  }
+}
