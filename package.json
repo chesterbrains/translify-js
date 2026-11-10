@@ -1,6 +1,6 @@
 {
   "name": "@translifyhq/client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Runtime client for Translify delivery: fetch, cache and revalidate published translations",
   "license": "MIT",
   "repository": {
