@@ -4,7 +4,7 @@ import type { Entry } from './storage.js';
 import type { EntryRef } from './url.js';
 
 import { TranslifyError, isDefinitive } from './errors.js';
-import { fetchEntry } from './fetcher.js';
+import { asTranslifyError, fetchEntry } from './fetcher.js';
 import { resolveOptions } from './options.js';
 import { deleteEntry, readEntry, writeEntry } from './storage.js';
 import { entryRef } from './url.js';
@@ -30,9 +30,6 @@ const sameBundle = (a: TranslifyBundle, b: Readonly<Record<string, string>>): bo
 
   return keysA.every((key) => (a as Record<string, string>)[key] === b[key]);
 };
-
-const asTranslifyError = (reason: unknown): TranslifyError =>
-  reason instanceof TranslifyError ? reason : new TranslifyError('NETWORK', `network error: ${String(reason)}`);
 
 export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
   const resolved: ResolvedOptions = resolveOptions(options);
@@ -104,7 +101,7 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
       }
       if (outcome.kind === 'notModified') {
         if (current === undefined) throw new TranslifyError('SERVER', '304 without a validator', 304);
-        const confirmed: Entry = { ...current, fetchedAt: Date.now() };
+        const confirmed: Entry = { ...current, fetchedAt: outcome.fetchedAt };
         await store(ref, confirmed);
 
         return confirmed;
@@ -124,7 +121,7 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
   };
 
   /** Memory, then storage. */
-  const held = async (ref: EntryRef): Promise<Entry | undefined> => {
+  const lookup = async (ref: EntryRef): Promise<Entry | undefined> => {
     const inMemory = entries.get(ref.storageKey);
     if (inMemory !== undefined) return inMemory;
     const stored = await readEntry(resolved.storage, ref.storageKey);
@@ -146,7 +143,7 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
   const load = async (locale: string): Promise<TranslifyBundle> => {
     assertLive();
     const locus = refs(locale);
-    const presence = await Promise.all(locus.map(held));
+    const presence = await Promise.all(locus.map(lookup));
     const missing = locus.filter((_, index) => presence[index] === undefined);
 
     if (missing.length === 0) {
@@ -167,7 +164,7 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
   const refresh = async (locale: string): Promise<TranslifyBundle> => {
     assertLive();
     const locus = refs(locale);
-    const presence = await Promise.all(locus.map(held));
+    const presence = await Promise.all(locus.map(lookup));
     if (presence.some((entry) => entry === undefined)) return load(locale);
 
     const results = await Promise.allSettled(locus.map(revalidate));

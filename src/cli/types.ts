@@ -1,7 +1,6 @@
 import { parseArgs } from 'node:util';
 
-import { TranslifyError } from '../errors.js';
-import { fetchEntry } from '../fetcher.js';
+import { asTranslifyError, fetchEntry, redact } from '../fetcher.js';
 import { resolveOptions } from '../options.js';
 import { entryRef } from '../url.js';
 
@@ -96,7 +95,10 @@ const parse = (argv: string[], env: CliIo['env']): Parsed | 'help' => {
       },
     }));
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : String(error));
+    // A stray positional is most likely the key typed without `--key`: never echo it.
+    const code = (error as { code?: unknown }).code;
+    if (code === 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL') throw new UsageError('unexpected argument; the key goes in --key or TRANSLIFY_DELIVERY_KEY');
+    throw new UsageError(redact(error instanceof Error ? error.message : String(error)));
   }
   if (values.help === true) return 'help';
 
@@ -150,7 +152,7 @@ export const main = async (argv: string[], io: CliIo): Promise<number> => {
       if (outcome.kind === 'fresh') for (const key of Object.keys(outcome.entry.bundle)) keys.add(key);
     }
   } catch (error) {
-    const failure = error instanceof TranslifyError ? error : new TranslifyError('NETWORK', String(error));
+    const failure = asTranslifyError(error);
     io.stderr(`error: ${failure.message}`);
 
     return failure.code === 'NETWORK' ? EXIT.network : EXIT.delivery;

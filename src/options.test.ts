@@ -20,6 +20,14 @@ describe('resolveOptions', () => {
     expect(resolveOptions({ ...base, baseUrl: 'https://h/api//' }).baseUrl).toBe('https://h/api');
   });
 
+  it('normalises baseUrl through the URL parser: empty query or fragment, dot segments, host case', () => {
+    expect(resolveOptions({ ...base, baseUrl: 'https://h/api?' }).baseUrl).toBe('https://h/api');
+    expect(resolveOptions({ ...base, baseUrl: 'https://h/api#' }).baseUrl).toBe('https://h/api');
+    expect(resolveOptions({ ...base, baseUrl: 'https://h/./api/' }).baseUrl).toBe('https://h/api');
+    expect(resolveOptions({ ...base, baseUrl: 'https://H/api' }).baseUrl).toBe('https://h/api');
+    expect(resolveOptions({ ...base, baseUrl: 'https://h' }).baseUrl).toBe('https://h');
+  });
+
   it('trims the strings', () => {
     const resolved = resolveOptions({ ...base, project: ' p ', environment: ' e ', key: ' pk_x ' });
     expect(resolved).toMatchObject({ project: 'p', environment: 'e', key: 'pk_x' });

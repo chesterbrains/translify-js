@@ -56,7 +56,8 @@ const baseUrlOf = (value: unknown): string => {
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw invalid('baseUrl must be an absolute http(s) URL');
   if (url.search !== '' || url.hash !== '') throw invalid('baseUrl must not carry a query string or fragment');
 
-  return text.replace(/\/+$/, '');
+  // Rebuild from the parsed parts: a bare `?` or `#`, dot segments and host case are normalised away.
+  return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
 };
 
 const namespacesOf = (value: string[] | undefined): string[] | undefined => {

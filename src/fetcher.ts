@@ -1,8 +1,9 @@
-import type { Bundle, Entry } from './storage.js';
+import type { Entry } from './storage.js';
 
 import { TranslifyError, codeForStatus } from './errors.js';
+import { isBundle } from './storage.js';
 
-export type FetchOutcome = { kind: 'fresh'; entry: Entry } | { kind: 'notModified' };
+export type FetchOutcome = { kind: 'fresh'; entry: Entry } | { kind: 'notModified'; fetchedAt: number };
 
 const MESSAGES: Record<ReturnType<typeof codeForStatus>, string> = {
   UNAUTHORIZED: 'delivery key refused: missing, revoked or not a publishable key',
@@ -12,18 +13,21 @@ const MESSAGES: Record<ReturnType<typeof codeForStatus>, string> = {
   SERVER: 'delivery answered',
 };
 
-const isBundle = (value: unknown): value is Bundle =>
-  typeof value === 'object' &&
-  value !== null &&
-  !Array.isArray(value) &&
-  Object.values(value as Record<string, unknown>).every((item) => typeof item === 'string');
+/** A failure message may quote the URL, and the URL carries the key. */
+export const redact = (text: string): string => text.replace(/pk_[A-Za-z0-9_-]+/g, '[key]');
 
-/** A fetch failure message may quote the URL, and the URL carries the key. */
-const redact = (text: string): string => text.replace(/pk_[A-Za-z0-9_-]+/g, '[key]');
-
+/** Any error named `AbortError` (a DOMException, or a polyfill's own class) is an abort. */
 const networkError = (cause: unknown): TranslifyError => {
-  if (cause instanceof DOMException && cause.name === 'AbortError') return new TranslifyError('NETWORK', 'request aborted');
+  if (cause instanceof Error && cause.name === 'AbortError') return new TranslifyError('NETWORK', 'request aborted');
   const detail = cause instanceof Error ? cause.message : String(cause);
+
+  return new TranslifyError('NETWORK', `network error: ${redact(detail)}`);
+};
+
+/** A `TranslifyError` passes through; anything else is a `NETWORK` error with the key redacted. */
+export const asTranslifyError = (reason: unknown): TranslifyError => {
+  if (reason instanceof TranslifyError) return reason;
+  const detail = reason instanceof Error ? reason.message : String(reason);
 
   return new TranslifyError('NETWORK', `network error: ${redact(detail)}`);
 };
@@ -49,7 +53,7 @@ export const fetchEntry = async (
   if (response.status === 304) {
     if (etag === undefined) throw new TranslifyError('SERVER', '304 without a validator', 304);
 
-    return { kind: 'notModified' };
+    return { kind: 'notModified', fetchedAt: now() };
   }
 
   if (response.status !== 200) {

@@ -270,6 +270,20 @@ describe('refresh', () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
+  it('redacts the key when a failure is not a TranslifyError (an onError that throws)', async () => {
+    const onError = vi.fn(() => {
+      throw new Error('handler failed for pk_abcd1234');
+    });
+    const storage = memoryStorage();
+    await writeEntry(storage, ref.storageKey, { etag: '"e1"', bundle: { 'cart.title': 'Old' }, fetchedAt: 1 });
+    const { client, fetchFn } = harness({ storage, onError });
+    fetchFn.mockResolvedValueOnce(res(500));
+    const error = (await client.refresh('it-IT').catch((reason: unknown) => reason)) as TranslifyError;
+    expect(error).toBeInstanceOf(TranslifyError);
+    expect(error.code).toBe('NETWORK');
+    expect(error.message).toBe('network error: handler failed for [key]');
+  });
+
   it('on an unknown locale behaves as load', async () => {
     const { client, fetchFn } = harness();
     fetchFn.mockResolvedValueOnce(okResponse({ a: 'b' }, '"e1"'));

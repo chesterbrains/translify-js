@@ -209,3 +209,27 @@ describe('main (review fixes)', () => {
     expect(fetchFn.mock.calls[0]?.[0]).toBe('https://h/api/delivery/acme-ecom/production/en-US?key=pk_x');
   });
 });
+
+describe('main (deferred minors)', () => {
+  it('a stray positional is refused without echoing it, since it may be the key', async () => {
+    const { io, err } = fake();
+    expect(await main(['pk_s3cret', ...ARGS], io)).toBe(EXIT.usage);
+    expect(err[0]).toBe('error: unexpected argument; the key goes in --key or TRANSLIFY_DELIVERY_KEY');
+    expect(err.join('\n')).not.toContain('pk_s3cret');
+  });
+
+  it('an unknown option is named, a key inside it is redacted', async () => {
+    const { io, err } = fake();
+    expect(await main([...ARGS, '--key=pk_s3cret', '--kye', 'x'], io)).toBe(EXIT.usage);
+    expect(err[0]).toBe("error: Unknown option '--kye'");
+    expect(await main([...ARGS, '--kye=pk_s3cret'], io)).toBe(EXIT.usage);
+    expect(err.join('\n')).not.toContain('pk_s3cret');
+  });
+
+  it('a failure that is not a TranslifyError is reported as NETWORK with the key redacted', async () => {
+    const { io, err, fetchFn } = fake();
+    fetchFn.mockResolvedValueOnce({ status: 200, text: () => Promise.resolve('{}'), headers: { get: () => { throw new Error('headers broke pk_s3cret'); } } });
+    expect(await main([...ARGS, '--key', 'pk_s3cret'], io)).toBe(EXIT.network);
+    expect(err).toEqual(['error: network error: headers broke [key]']);
+  });
+});

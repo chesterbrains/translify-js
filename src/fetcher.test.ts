@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 
 import { TranslifyError } from './errors.js';
-import { fetchEntry } from './fetcher.js';
+import { asTranslifyError, fetchEntry } from './fetcher.js';
 
 const fixture = JSON.parse(readFileSync(new URL('./__fixtures__/delivery-headers.json', import.meta.url), 'utf8')) as {
   identity: Record<string, string>;
@@ -51,7 +51,7 @@ describe('fetchEntry', () => {
   });
 
   it('304 with a held etag → notModified', async () => {
-    expect(await fetchEntry(fetchOf(res(304)), url, '"a"', signal)).toEqual({ kind: 'notModified' });
+    expect(await fetchEntry(fetchOf(res(304)), url, '"a"', signal, () => 42)).toEqual({ kind: 'notModified', fetchedAt: 42 });
   });
 
   it('304 without a held etag → SERVER', async () => {
@@ -105,10 +105,32 @@ describe('fetchEntry', () => {
     expect(error.message).toBe('request aborted');
   });
 
+  it('any error named AbortError → NETWORK "request aborted", not only a DOMException', async () => {
+    const cause = new Error('aborted by a fetch polyfill');
+    cause.name = 'AbortError';
+    const error = await failure(cause);
+    expect(error.code).toBe('NETWORK');
+    expect(error.message).toBe('request aborted');
+  });
+
   it('never includes the url, and so the key, in an error message', async () => {
     for (const response of [res(401), res(404), res(500), res(200, '[]'), new TypeError(`fetch failed for ${url}`)]) {
       const error = await failure(response);
       expect(error.message).not.toContain('pk_');
     }
+  });
+});
+
+describe('asTranslifyError', () => {
+  it('passes a TranslifyError through unchanged', () => {
+    const error = new TranslifyError('NOT_FOUND', 'gone', 404);
+    expect(asTranslifyError(error)).toBe(error);
+  });
+
+  it('wraps anything else as NETWORK with the key redacted', () => {
+    const error = asTranslifyError(new Error(`listener failed for ${url}`));
+    expect(error.code).toBe('NETWORK');
+    expect(error.message).toBe('network error: listener failed for https://h/api/delivery/p/e/it-IT?key=[key]');
+    expect(asTranslifyError('plain pk_abc').message).toBe('network error: plain [key]');
   });
 });

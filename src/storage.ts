@@ -72,7 +72,8 @@ export const localStorageStorage = (): BundleStorage => {
 
 const ENTRY_VERSION = 1;
 
-const isBundle = (value: unknown): value is Bundle =>
+/** A delivery body or a stored bundle: a flat object whose values are all strings. */
+export const isBundle = (value: unknown): value is Bundle =>
   typeof value === 'object' &&
   value !== null &&
   !Array.isArray(value) &&
