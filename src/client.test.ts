@@ -5,7 +5,7 @@ import type { BundleStorage } from './storage.js';
 
 import { createTranslify } from './client.js';
 import { TranslifyError } from './errors.js';
-import { memoryStorage } from './storage.js';
+import { memoryStorage, writeEntry } from './storage.js';
 import { entryRef } from './url.js';
 
 const base = { baseUrl: 'https://h/api', project: 'acme-ecom', environment: 'production', key: 'pk_abcd1234' };
@@ -125,5 +125,155 @@ describe('subscribe', () => {
 
     await expect(client.load('it-IT')).resolves.toBeDefined();
     expect(second).toHaveBeenCalledTimes(1);
+  });
+});
+
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe('load (stored entry)', () => {
+  const ref = entryRef(base, 'it-IT', undefined);
+  const stored = async (storage: BundleStorage): Promise<void> => {
+    await writeEntry(storage, ref.storageKey, { etag: '"e1"', bundle: { 'cart.title': 'Old' }, fetchedAt: 1 });
+  };
+
+  it('resolves without waiting for the network, then revalidates with If-None-Match', async () => {
+    const { client, fetchFn, storage } = harness();
+    await stored(storage);
+    let release!: () => void;
+    fetchFn.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = () => resolve(res(304));
+      }),
+    );
+
+    const bundle = await client.load('it-IT');
+
+    expect(bundle).toEqual({ 'cart.title': 'Old' });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn.mock.calls[0]?.[1]).toMatchObject({ headers: { 'If-None-Match': '"e1"' } });
+
+    release();
+    await flush();
+    expect(client.bundle('it-IT')).toBe(bundle);
+  });
+
+  it('a 304 refreshes fetchedAt in storage', async () => {
+    const { client, fetchFn, storage } = harness();
+    await stored(storage);
+    fetchFn.mockResolvedValueOnce(res(304));
+    await client.load('it-IT');
+    await flush();
+    const after = JSON.parse((await storage.get(ref.storageKey)) as string) as { fetchedAt: number };
+    expect(after.fetchedAt).toBeGreaterThan(1);
+  });
+
+  it('a 200 on revalidation replaces the bundle, stores it and notifies', async () => {
+    const { client, fetchFn, storage } = harness();
+    await stored(storage);
+    fetchFn.mockResolvedValueOnce(okResponse({ 'cart.title': 'New' }, '"e2"'));
+    const listener = vi.fn();
+    client.subscribe(listener);
+
+    const first = await client.load('it-IT');
+    await flush();
+
+    expect(first).toEqual({ 'cart.title': 'Old' });
+    expect(client.bundle('it-IT')).toEqual({ 'cart.title': 'New' });
+    expect(client.bundle('it-IT')).not.toBe(first);
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((await storage.get(ref.storageKey)) as string)).toMatchObject({ etag: '"e2"' });
+  });
+
+  it.each([503, 429])('a %i on revalidation keeps the entry in memory and storage and calls onError', async (status) => {
+    const { client, fetchFn, storage, onError } = harness();
+    await stored(storage);
+    fetchFn.mockResolvedValueOnce(res(status));
+
+    const bundle = await client.load('it-IT');
+    await flush();
+
+    expect(client.bundle('it-IT')).toBe(bundle);
+    expect(await storage.get(ref.storageKey)).toBeDefined();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({ status });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a network failure on revalidation is reported and load still resolves', async () => {
+    const { client, fetchFn, storage, onError } = harness();
+    await stored(storage);
+    fetchFn.mockRejectedValueOnce(new TypeError('offline'));
+
+    await expect(client.load('it-IT')).resolves.toEqual({ 'cart.title': 'Old' });
+    await flush();
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({ code: 'NETWORK' });
+  });
+
+  it.each([401, 404, 400])(
+    'a %i on revalidation deletes the stored entry, keeps the in-memory bundle and calls onError',
+    async (status) => {
+      const { client, fetchFn, storage, onError } = harness();
+      await stored(storage);
+      fetchFn.mockResolvedValueOnce(res(status));
+
+      const bundle = await client.load('it-IT');
+      await flush();
+
+      expect(client.bundle('it-IT')).toBe(bundle);
+      expect(client.get('it-IT', 'cart.title')).toBe('Old');
+      expect(await storage.get(ref.storageKey)).toBeUndefined();
+      expect(onError.mock.calls[0]?.[0]).toMatchObject({ status });
+    },
+  );
+
+  it('after a definitive failure a fresh client on the same storage fails loudly', async () => {
+    const storage = memoryStorage();
+    await stored(storage);
+    const first = harness({ storage });
+    first.fetchFn.mockResolvedValueOnce(res(404));
+    await first.client.load('it-IT');
+    await flush();
+
+    const second = harness({ storage });
+    second.fetchFn.mockResolvedValueOnce(res(404));
+    await expect(second.client.load('it-IT')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
+
+describe('refresh', () => {
+  const ref = entryRef(base, 'it-IT', undefined);
+
+  it('on a held locale awaits the revalidation and returns the new bundle', async () => {
+    const { client, fetchFn, storage } = harness();
+    await writeEntry(storage, ref.storageKey, { etag: '"e1"', bundle: { a: 'old' }, fetchedAt: 1 });
+    fetchFn.mockResolvedValueOnce(res(304)).mockResolvedValueOnce(okResponse({ a: 'new' }, '"e2"'));
+    await client.load('it-IT');
+    await flush();
+
+    const bundle = await client.refresh('it-IT');
+
+    expect(bundle).toEqual({ a: 'new' });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(fetchFn.mock.calls[1]?.[1]).toMatchObject({ headers: { 'If-None-Match': '"e1"' } });
+  });
+
+  it('on a held locale rejects on failure and still applies the failure policy', async () => {
+    const { client, fetchFn, storage, onError } = harness();
+    await writeEntry(storage, ref.storageKey, { etag: '"e1"', bundle: { a: 'old' }, fetchedAt: 1 });
+    fetchFn.mockResolvedValueOnce(res(304)).mockResolvedValueOnce(res(401));
+    await client.load('it-IT');
+    await flush();
+
+    await expect(client.refresh('it-IT')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(await storage.get(ref.storageKey)).toBeUndefined();
+    expect(client.get('it-IT', 'a')).toBe('old');
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('on an unknown locale behaves as load', async () => {
+    const { client, fetchFn } = harness();
+    fetchFn.mockResolvedValueOnce(okResponse({ a: 'b' }, '"e1"'));
+    await expect(client.refresh('it-IT')).resolves.toEqual({ a: 'b' });
+    expect(fetchFn.mock.calls[0]?.[1]).toMatchObject({ headers: undefined });
   });
 });

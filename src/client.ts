@@ -3,10 +3,10 @@ import type { ResolvedOptions, TranslifyOptions } from './options.js';
 import type { Entry } from './storage.js';
 import type { EntryRef } from './url.js';
 
-import { TranslifyError } from './errors.js';
+import { TranslifyError, isDefinitive } from './errors.js';
 import { fetchEntry } from './fetcher.js';
 import { resolveOptions } from './options.js';
-import { writeEntry } from './storage.js';
+import { deleteEntry, readEntry, writeEntry } from './storage.js';
 import { entryRef } from './url.js';
 
 export interface TranslifyClient {
@@ -30,6 +30,9 @@ const sameBundle = (a: TranslifyBundle, b: Readonly<Record<string, string>>): bo
 
   return keysA.every((key) => (a as Record<string, string>)[key] === b[key]);
 };
+
+const asTranslifyError = (reason: unknown): TranslifyError =>
+  reason instanceof TranslifyError ? reason : new TranslifyError('NETWORK', `network error: ${String(reason)}`);
 
 export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
   const resolved: ResolvedOptions = resolveOptions(options);
@@ -67,28 +70,98 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
     return next;
   };
 
-  const fetchFresh = (ref: EntryRef): Promise<Entry> => {
+  const store = async (ref: EntryRef, entry: Entry): Promise<void> => {
+    entries.set(ref.storageKey, entry);
+    await writeEntry(resolved.storage, ref.storageKey, entry);
+  };
+
+  /** One request per entry at a time; concurrent callers share it. */
+  const request = (ref: EntryRef, etag: string | undefined): Promise<Entry> => {
     const pending = inflight.get(ref.storageKey);
     if (pending !== undefined) return pending;
 
-    const request = (async (): Promise<Entry> => {
-      const outcome = await fetchEntry(resolved.fetch, ref.url, undefined, controller.signal);
-      if (outcome.kind !== 'fresh') throw new TranslifyError('SERVER', '304 without a validator', 304);
-      entries.set(ref.storageKey, outcome.entry);
-      await writeEntry(resolved.storage, ref.storageKey, outcome.entry);
+    const held = entries.get(ref.storageKey);
+    const run = (async (): Promise<Entry> => {
+      const outcome = await fetchEntry(resolved.fetch, ref.url, etag, controller.signal);
+      if (outcome.kind === 'notModified') {
+        if (held === undefined) throw new TranslifyError('SERVER', '304 without a validator', 304);
+        const confirmed: Entry = { ...held, fetchedAt: Date.now() };
+        await store(ref, confirmed);
+
+        return confirmed;
+      }
+      await store(ref, outcome.entry);
 
       return outcome.entry;
     })().finally(() => inflight.delete(ref.storageKey));
-    inflight.set(ref.storageKey, request);
+    inflight.set(ref.storageKey, run);
 
-    return request;
+    return run;
+  };
+
+  /** Revalidate a held entry and apply the failure policy (spec §6 step 3). Rethrows after reporting. */
+  const revalidate = async (ref: EntryRef): Promise<void> => {
+    const held = entries.get(ref.storageKey);
+    try {
+      await request(ref, held?.etag);
+    } catch (reason) {
+      const error = asTranslifyError(reason);
+      if (isDefinitive(error.code)) await deleteEntry(resolved.storage, ref.storageKey);
+      resolved.onError(error);
+      throw error;
+    }
+  };
+
+  /** Memory, then storage. */
+  const held = async (ref: EntryRef): Promise<Entry | undefined> => {
+    const inMemory = entries.get(ref.storageKey);
+    if (inMemory !== undefined) return inMemory;
+    const stored = await readEntry(resolved.storage, ref.storageKey);
+    if (stored !== undefined) entries.set(ref.storageKey, stored);
+
+    return stored;
+  };
+
+  const assertLive = (): void => {
+    if (disposed) throw new TranslifyError('INVALID_OPTIONS', 'client disposed');
+  };
+
+  const background = (ref: EntryRef, locale: string): void => {
+    void revalidate(ref)
+      .then(() => publish(locale))
+      .catch(() => undefined);
   };
 
   const load = async (locale: string): Promise<TranslifyBundle> => {
-    if (disposed) throw new TranslifyError('INVALID_OPTIONS', 'client disposed');
-    const results = await Promise.allSettled(refs(locale).map(fetchFresh));
+    assertLive();
+    const locus = refs(locale);
+    const presence = await Promise.all(locus.map(held));
+    const missing = locus.filter((_, index) => presence[index] === undefined);
+
+    if (missing.length === 0) {
+      const bundle = publish(locale);
+      for (const ref of locus) background(ref, locale);
+
+      return bundle;
+    }
+
+    for (const ref of locus) if (!missing.includes(ref)) background(ref, locale);
+    const results = await Promise.allSettled(missing.map((ref) => request(ref, undefined)));
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
-    if (failed !== undefined) throw failed.reason;
+    if (failed !== undefined) throw asTranslifyError(failed.reason);
+
+    return publish(locale);
+  };
+
+  const refresh = async (locale: string): Promise<TranslifyBundle> => {
+    assertLive();
+    const locus = refs(locale);
+    const presence = await Promise.all(locus.map(held));
+    if (presence.some((entry) => entry === undefined)) return load(locale);
+
+    const results = await Promise.allSettled(locus.map(revalidate));
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed !== undefined) throw asTranslifyError(failed.reason);
 
     return publish(locale);
   };
@@ -104,7 +177,7 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
         listeners.delete(listener);
       };
     },
-    refresh: load,
+    refresh,
     dispose: () => {
       disposed = true;
       controller.abort();
