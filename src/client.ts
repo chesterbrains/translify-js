@@ -82,7 +82,11 @@ export const createTranslify = (options: TranslifyOptions): TranslifyClient => {
 
     const held = entries.get(ref.storageKey);
     const run = (async (): Promise<Entry> => {
-      const outcome = await fetchEntry(resolved.fetch, ref.url, etag, controller.signal);
+      if (disposed) throw new TranslifyError('NETWORK', 'client disposed');
+      const outcome = await fetchEntry(resolved.fetch, ref.url, etag, controller.signal).catch((reason: unknown) => {
+        // A fetch aborted by dispose says why; any other abort keeps the fetcher's wording.
+        throw disposed ? new TranslifyError('NETWORK', 'client disposed') : reason;
+      });
       if (outcome.kind === 'notModified') {
         if (held === undefined) throw new TranslifyError('SERVER', '304 without a validator', 304);
         const confirmed: Entry = { ...held, fetchedAt: Date.now() };

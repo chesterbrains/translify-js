@@ -277,3 +277,101 @@ describe('refresh', () => {
     expect(fetchFn.mock.calls[0]?.[1]).toMatchObject({ headers: undefined });
   });
 });
+
+describe('namespaces', () => {
+  const ns = { namespaces: ['cart', 'checkout'] };
+  const cartRef = entryRef(base, 'it-IT', 'cart');
+  const checkoutRef = entryRef(base, 'it-IT', 'checkout');
+  const byUrl = (fetchFn: ReturnType<typeof vi.fn>, answers: Record<string, () => Response | Promise<Response>>): void => {
+    fetchFn.mockImplementation((url: string) => {
+      const namespace = new URL(url).searchParams.get('namespace') ?? '';
+      const answer = answers[namespace];
+      if (answer === undefined) throw new Error(`unexpected namespace ${namespace}`);
+
+      return Promise.resolve(answer());
+    });
+  };
+
+  it('loads one request per namespace and merges them in order', async () => {
+    const { client, fetchFn } = harness(ns);
+    byUrl(fetchFn, { cart: () => okResponse({ 'cart.title': 'C' }, '"c1"'), checkout: () => okResponse({ 'checkout.pay': 'P' }, '"k1"') });
+
+    const bundle = await client.load('it-IT');
+
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(fetchFn.mock.calls.map((call) => new URL(call[0] as string).searchParams.get('namespace'))).toEqual(['cart', 'checkout']);
+    expect(bundle).toEqual({ 'cart.title': 'C', 'checkout.pay': 'P' });
+  });
+
+  it('resolves immediately only when every namespace is stored', async () => {
+    const { client, fetchFn, storage } = harness(ns);
+    await writeEntry(storage, cartRef.storageKey, { etag: '"c1"', bundle: { 'cart.title': 'C' }, fetchedAt: 1 });
+    byUrl(fetchFn, { cart: () => res(304), checkout: () => okResponse({ 'checkout.pay': 'P' }, '"k1"') });
+
+    const bundle = await client.load('it-IT');
+
+    expect(bundle).toEqual({ 'cart.title': 'C', 'checkout.pay': 'P' });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    await flush();
+    expect(client.bundle('it-IT')).toBe(bundle);
+  });
+
+  it('rejects the whole load when one namespace fails and publishes nothing', async () => {
+    const { client, fetchFn, storage } = harness(ns);
+    byUrl(fetchFn, { cart: () => okResponse({ 'cart.title': 'C' }, '"c1"'), checkout: () => res(404) });
+    const listener = vi.fn();
+    client.subscribe(listener);
+
+    await expect(client.load('it-IT')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    expect(client.bundle('it-IT')).toBeUndefined();
+    expect(listener).not.toHaveBeenCalled();
+    expect(await storage.get(cartRef.storageKey)).toBeDefined();
+    expect(await storage.get(checkoutRef.storageKey)).toBeUndefined();
+  });
+
+  it('a background 200 on one namespace republishes the merged bundle', async () => {
+    const { client, fetchFn, storage } = harness(ns);
+    await writeEntry(storage, cartRef.storageKey, { etag: '"c1"', bundle: { 'cart.title': 'Old' }, fetchedAt: 1 });
+    await writeEntry(storage, checkoutRef.storageKey, { etag: '"k1"', bundle: { 'checkout.pay': 'P' }, fetchedAt: 1 });
+    byUrl(fetchFn, { cart: () => okResponse({ 'cart.title': 'New' }, '"c2"'), checkout: () => res(304) });
+
+    const first = await client.load('it-IT');
+    await flush();
+
+    expect(first).toEqual({ 'cart.title': 'Old', 'checkout.pay': 'P' });
+    expect(client.bundle('it-IT')).toEqual({ 'cart.title': 'New', 'checkout.pay': 'P' });
+  });
+});
+
+describe('dispose', () => {
+  it('aborts an in-flight load, which rejects NETWORK "client disposed", and silences listeners', async () => {
+    const { client, fetchFn } = harness();
+    fetchFn.mockImplementationOnce(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        }),
+    );
+    const listener = vi.fn();
+    client.subscribe(listener);
+
+    const pending = client.load('it-IT');
+    client.dispose();
+
+    await expect(pending).rejects.toMatchObject({ code: 'NETWORK', message: 'client disposed' });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('load after dispose rejects INVALID_OPTIONS and bundle still reads memory', async () => {
+    const { client, fetchFn } = harness();
+    fetchFn.mockResolvedValueOnce(okResponse({ a: 'b' }, '"e1"'));
+    await client.load('it-IT');
+
+    client.dispose();
+
+    await expect(client.load('it-IT')).rejects.toMatchObject({ code: 'INVALID_OPTIONS', message: 'client disposed' });
+    await expect(client.refresh('it-IT')).rejects.toMatchObject({ code: 'INVALID_OPTIONS' });
+    expect(client.get('it-IT', 'a')).toBe('b');
+  });
+});
